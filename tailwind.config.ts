@@ -9,8 +9,11 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        background: "var(--background)",
-        foreground: "var(--foreground)",
+        background: "var(--bg-primary)",
+        foreground: "var(--text-primary)",
+      },
+      animation: {
+        'bounce-slow': 'bounce 1.5s infinite',
       },
     },
   },
