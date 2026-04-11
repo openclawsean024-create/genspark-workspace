@@ -3,7 +3,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Sidebar } from '@/components/Sidebar';
 import { ChatPanel } from '@/components/ChatPanel';
+import { ToastProvider, ToastContainer, useToast } from '@/components/Toast';
+import { GlobalProgressBar, setGlobalProgress } from '@/components/ProgressBar';
+import { DebugPanel } from '@/components/DebugPanel';
 import { Workspace, Conversation, Message, Plugin, AIModel } from '@/types';
+import { isLoading, isUploading, UIMachineContext, INITIAL_UI_STATE, UIAction, uiReducer } from '@/types/uiMachine';
 
 const DEFAULT_PLUGINS: Plugin[] = [
   { id: 'web_search', name: '網頁搜尋', description: '即時網路搜尋', enabled: false, icon: '🌐' },
@@ -30,7 +34,9 @@ function generateDemoReply(model: AIModel, userMessage: string): string {
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
-export default function HomePage() {
+function HomePageInner() {
+  const { addToast } = useToast();
+
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [conversations, setConversations] = useState<Record<string, Conversation[]>>({});
   const [messages, setMessages] = useState<Message[]>([]);
@@ -38,8 +44,11 @@ export default function HomePage() {
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<AIModel>('gpt-4o');
   const [plugins, setPlugins] = useState<Plugin[]>(DEFAULT_PLUGINS);
-  const [isLoading, setIsLoading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // UI State Machine
+  const [uiState, _setUiState] = useState<UIMachineContext>(INITIAL_UI_STATE);
+  const uiDispatch = (action: UIAction) => _setUiState(prev => uiReducer(prev, action));
 
   // Load from localStorage
   useEffect(() => {
@@ -56,8 +65,14 @@ export default function HomePage() {
       if (savedConv) setConversations(JSON.parse(savedConv));
       if (savedPlugins) setPlugins(JSON.parse(savedPlugins));
       if (savedMsgs) setMessages(JSON.parse(savedMsgs));
-      if (activeWs) setActiveWorkspaceId(activeWs);
-      if (activeConv) setActiveConversationId(activeConv);
+      if (activeWs) {
+        setActiveWorkspaceId(activeWs);
+        uiDispatch({ type: 'SELECT_WORKSPACE', workspaceId: activeWs });
+      }
+      if (activeConv) {
+        setActiveConversationId(activeConv);
+        uiDispatch({ type: 'SELECT_CONVERSATION', workspaceId: activeWs || '', conversationId: activeConv });
+      }
       if (savedModel) setSelectedModel(savedModel as AIModel);
     } catch {}
   }, []);
@@ -94,40 +109,53 @@ export default function HomePage() {
   const handleNewWorkspace = async () => {
     const name = prompt('輸入 Workspace 名稱：', '我的 Workspace');
     if (!name) return;
-    const res = await fetch('/api/workspace', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, userId: 'local_user' }),
-    });
-    const { workspace } = await res.json();
-    setWorkspaces(prev => [...prev, workspace]);
-    setConversations(prev => ({ ...prev, [workspace.id]: [] }));
-    setActiveWorkspaceId(workspace.id);
-    setActiveConversationId(null);
-    setMessages([]);
+    try {
+      const res = await fetch('/api/workspace', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, userId: 'local_user' }),
+      });
+      const { workspace } = await res.json();
+      setWorkspaces(prev => [...prev, workspace]);
+      setConversations(prev => ({ ...prev, [workspace.id]: [] }));
+      setActiveWorkspaceId(workspace.id);
+      setActiveConversationId(null);
+      setMessages([]);
+      uiDispatch({ type: 'SELECT_WORKSPACE', workspaceId: workspace.id });
+      addToast('success', `Workspace「${name}」建立成功`);
+    } catch {
+      addToast('error', 'Workspace 建立失敗');
+    }
   };
 
   const handleNewConversation = async (workspaceId: string) => {
     const title = prompt('輸入對話標題：', '新對話');
-    const res = await fetch('/api/conversation', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workspaceId, title }),
-    });
-    const { conversation } = await res.json();
-    setConversations(prev => ({
-      ...prev,
-      [workspaceId]: [...(prev[workspaceId] || []), conversation],
-    }));
-    setActiveWorkspaceId(workspaceId);
-    setActiveConversationId(conversation.id);
-    setMessages([]);
+    try {
+      const res = await fetch('/api/conversation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId, title }),
+      });
+      const { conversation } = await res.json();
+      setConversations(prev => ({
+        ...prev,
+        [workspaceId]: [...(prev[workspaceId] || []), conversation],
+      }));
+      setActiveWorkspaceId(workspaceId);
+      setActiveConversationId(conversation.id);
+      setMessages([]);
+      uiDispatch({ type: 'SELECT_CONVERSATION', workspaceId, conversationId: conversation.id });
+      addToast('success', '新對話已建立');
+    } catch {
+      addToast('error', '對話建立失敗');
+    }
   };
 
   const handleSelectWorkspace = (id: string) => {
     setActiveWorkspaceId(id);
     setActiveConversationId(null);
     setMessages([]);
+    uiDispatch({ type: 'SELECT_WORKSPACE', workspaceId: id });
   };
 
   const handleSelectConversation = (workspaceId: string, conversationId: string) => {
@@ -135,6 +163,7 @@ export default function HomePage() {
     setActiveConversationId(conversationId);
     const conv = conversations[workspaceId]?.find(c => c.id === conversationId);
     setMessages(conv?.messages || []);
+    uiDispatch({ type: 'SELECT_CONVERSATION', workspaceId, conversationId });
   };
 
   const handleSend = useCallback(async (content: string) => {
@@ -150,6 +179,9 @@ export default function HomePage() {
       return updated;
     });
 
+    uiDispatch({ type: 'SEND_MESSAGE', content });
+    setGlobalProgress(30, '正在發送訊息...');
+
     const enabledPlugins = plugins.filter(p => p.enabled).map(p => p.id);
 
     try {
@@ -158,6 +190,7 @@ export default function HomePage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: [...messages, userMsg], model: selectedModel, plugins: enabledPlugins }),
       });
+      setGlobalProgress(60, '等待 AI 回覆...');
       const data = await res.json();
 
       if (data.reply) {
@@ -173,19 +206,29 @@ export default function HomePage() {
           localStorage.setItem('gs_messages', JSON.stringify(updated));
           return updated;
         });
+        uiDispatch({ type: 'MESSAGE_RECEIVED', messageId: aiMsg.id });
 
-        // Update conversation
         if (activeConversationId && activeWorkspaceId) {
           setConversations(prev => ({
             ...prev,
             [activeWorkspaceId]: (prev[activeWorkspaceId] || []).map(c =>
-              c.id === activeConversationId ? { ...c, messages: [...prev[activeWorkspaceId].find(x => x.id === activeConversationId)?.messages || [], userMsg, aiMsg], updatedAt: new Date().toISOString() } : c
+              c.id === activeConversationId
+                ? {
+                    ...c,
+                    messages: [...(prev[activeWorkspaceId].find(x => x.id === activeConversationId)?.messages || []), userMsg, aiMsg],
+                    updatedAt: new Date().toISOString(),
+                  }
+                : c
             ),
           }));
         }
+        setGlobalProgress(100, '回覆完成');
+        setTimeout(() => setGlobalProgress(-1), 1000);
+        uiDispatch({ type: 'SEND_COMPLETE' });
       }
     } catch {
       // Demo mode fallback
+      setGlobalProgress(50, '使用離線模式...');
       const reply = generateDemoReply(selectedModel, content);
       const aiMsg: Message = {
         id: crypto.randomUUID(),
@@ -199,11 +242,20 @@ export default function HomePage() {
         localStorage.setItem('gs_messages', JSON.stringify(updated));
         return updated;
       });
+      uiDispatch({ type: 'MESSAGE_RECEIVED', messageId: aiMsg.id });
+      setGlobalProgress(100, '離線回覆完成');
+      setTimeout(() => setGlobalProgress(-1), 1000);
+      uiDispatch({ type: 'SEND_COMPLETE' });
+      addToast('info', '目前為離線演示模式');
     }
-  }, [messages, selectedModel, plugins, activeConversationId, activeWorkspaceId]);
+  }, [messages, selectedModel, plugins, activeConversationId, activeWorkspaceId, addToast]);
 
   const handleTogglePlugin = (pluginId: string) => {
     setPlugins(prev => prev.map(p => p.id === pluginId ? { ...p, enabled: !p.enabled } : p));
+    const plugin = plugins.find(p => p.id === pluginId);
+    if (plugin) {
+      addToast('info', `${plugin.name} 已${plugin.enabled ? '停用' : '啟用'}`);
+    }
   };
 
   const handleDeleteConversation = async (workspaceId: string, conversationId: string) => {
@@ -214,7 +266,9 @@ export default function HomePage() {
     if (activeConversationId === conversationId) {
       setActiveConversationId(null);
       setMessages([]);
+      uiDispatch({ type: 'GO_HOME' });
     }
+    addToast('success', '對話已刪除');
   };
 
   const handleDeleteWorkspace = (workspaceId: string) => {
@@ -229,12 +283,15 @@ export default function HomePage() {
       setActiveWorkspaceId(null);
       setActiveConversationId(null);
       setMessages([]);
+      uiDispatch({ type: 'GO_HOME' });
     }
+    addToast('success', 'Workspace 已刪除');
   };
 
   const handleSwitchModel = async (messageId: string, model: AIModel) => {
     const msg = messages.find(m => m.id === messageId);
     if (!msg) return;
+    setGlobalProgress(30, `切換至 ${model}...`);
     const enabledPlugins = plugins.filter(p => p.enabled).map(p => p.id);
     try {
       const res = await fetch('/api/chat', {
@@ -242,27 +299,34 @@ export default function HomePage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: messages.filter(m => m.id !== messageId).concat([msg]), model, plugins: enabledPlugins }),
       });
+      setGlobalProgress(70, '接收回覆...');
       const data = await res.json();
       if (data.reply) {
         setMessages(prev => prev.map(m => m.id === messageId ? { ...m, content: data.reply, model } : m));
+        addToast('success', `已重新生成回覆（${model}）`);
       }
     } catch {
       setMessages(prev => prev.map(m => m.id === messageId ? { ...m, content: generateDemoReply(model, m.content), model } : m));
     }
+    setGlobalProgress(100);
+    setTimeout(() => setGlobalProgress(-1), 800);
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     if (file.size > 50 * 1024 * 1024) {
-      alert('檔案超過 50MB 限制');
+      addToast('error', '檔案超過 50MB 限制');
       return;
     }
-    setIsLoading(true);
+    uiDispatch({ type: 'UPLOAD_FILE', file });
+    setGlobalProgress(10, `上傳中: ${file.name}`);
+
     try {
       const formData = new FormData();
       formData.append('file', file);
       const res = await fetch('/api/upload', { method: 'POST', body: formData });
+      setGlobalProgress(50, `處理中: ${file.name}`);
       const data = await res.json();
 
       let content = '';
@@ -274,16 +338,38 @@ export default function HomePage() {
         content = `[檔案: ${file.name}]\n${data.content.slice(0, 500)}`;
       }
 
+      uiDispatch({ type: 'UPLOAD_COMPLETE' });
+      setGlobalProgress(80, '發送至 AI...');
       await handleSend(content);
+      setGlobalProgress(100);
+      setTimeout(() => setGlobalProgress(-1), 500);
+      addToast('success', `${file.name} 上傳成功`);
     } catch {
+      uiDispatch({ type: 'UPLOAD_FAILED', error: '上傳失敗' });
+      setGlobalProgress(-1);
+      addToast('error', '檔案上傳失敗');
       await handleSend(`[檔案上傳失敗: ${file.name}]`);
     }
-    setIsLoading(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const loading = isLoading(uiState);
+  const uploading = isUploading(uiState);
+
+  const debugState = {
+    workspaces: workspaces.length,
+    conversations: Object.values(conversations).flat().length,
+    messages: messages.length,
+    activeWorkspace: activeWorkspaceId,
+    activeConversation: activeConversationId,
+    model: selectedModel,
+    plugins: plugins.filter(p => p.enabled).map(p => p.id),
   };
 
   return (
     <div className="flex h-screen overflow-hidden">
+      <GlobalProgressBar />
+
       <Sidebar
         workspaces={workspaces}
         conversations={conversations}
@@ -323,10 +409,10 @@ export default function HomePage() {
               />
               <label
                 htmlFor="file-upload"
-                className={`flex items-center justify-center w-12 h-12 rounded-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] shadow-lg cursor-pointer transition-all hover:scale-105 ${isLoading ? 'animate-pulse' : ''}`}
+                className={`flex items-center justify-center w-12 h-12 rounded-full bg-[var(--accent)] hover:bg-[var(--accent-hover)] shadow-lg cursor-pointer transition-all hover:scale-105 ${(loading || uploading) ? 'animate-pulse opacity-70' : ''}`}
                 title="上傳檔案 (PDF, 圖片, CSV, Markdown)"
               >
-                📎
+                {uploading ? '⏳' : '📎'}
               </label>
             </div>
 
@@ -356,6 +442,17 @@ export default function HomePage() {
           </div>
         )}
       </div>
+
+      <DebugPanel state={debugState} />
     </div>
+  );
+}
+
+export default function HomePage() {
+  return (
+    <ToastProvider>
+      <HomePageInner />
+      <ToastContainer />
+    </ToastProvider>
   );
 }
